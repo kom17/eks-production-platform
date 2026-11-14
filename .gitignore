@@ -25,7 +25,7 @@ venv/
 .ruff_cache/
 
 # Scan output
-checkov-results/
+checkov-results*
 sbom*.json
 rendered.yaml
 

@@ -11,7 +11,7 @@ download-external-modules: false
 output:
   - cli
   - sarif
-output-file-path: console,checkov-results
+output-file-path: console,checkov-results.sarif
 # Blocking: any NEW finding fails the PR. (First run triaged: 122 passed,
 # remaining findings are the documented skips below.)
 soft-fail: false
