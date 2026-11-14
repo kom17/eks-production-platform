@@ -1,0 +1,200 @@
+# -----------------------------------------------------------------------------
+# Terraform pipeline
+#   PR   -> fmt, validate, tflint, checkov  -> plan (read-only role) -> plan posted as PR comment
+#   main -> same checks -> plan -> manual approval ("production" environment) -> apply
+#
+# No AWS keys anywhere: GitHub OIDC -> short-lived STS credentials.
+# Repo variables required (Settings > Secrets and variables > Actions > Variables):
+#   TF_STATE_BUCKET, TF_PLAN_ROLE_ARN, TF_APPLY_ROLE_ARN, GITHUB_OIDC_PROVIDER_ARN,
+#   CLUSTER_ADMIN_ARNS (JSON list, e.g. ["arn:aws:iam::123456789012:user/me"])
+# -----------------------------------------------------------------------------
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".tflint.hcl"
+      - ".checkov.yaml"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".tflint.hcl"
+      - ".checkov.yaml"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two plans/applies against the same state at once
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.17.1"
+  TFLINT_VERSION: "v0.65.0"
+  CHECKOV_VERSION: "3.4.0"
+  AWS_REGION: ap-south-1
+  WORKDIR: terraform/environments/dev
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_github_repo: ${{ github.repository }}
+  TF_VAR_github_oidc_provider_arn: ${{ vars.GITHUB_OIDC_PROVIDER_ARN }}
+  TF_VAR_ci_apply_role_arn: ${{ vars.TF_APPLY_ROLE_ARN }}
+  TF_VAR_ci_plan_role_arn: ${{ vars.TF_PLAN_ROLE_ARN }}
+  TF_VAR_cluster_admin_arns: ${{ vars.CLUSTER_ADMIN_ARNS }}
+
+jobs:
+  static-checks:
+    name: Lint & security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # checkov findings -> Security tab (code scanning)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff terraform
+
+      - name: terraform validate (all stacks)
+        run: |
+          for dir in terraform/bootstrap terraform/environments/dev; do
+            echo "::group::validate $dir"
+            terraform -chdir="$dir" init -backend=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - name: tflint
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # avoids API rate limits when downloading plugins
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: checkov (IaC security scan)
+        run: |
+          pip install --quiet "checkov==${CHECKOV_VERSION}"
+          checkov --config-file .checkov.yaml
+
+      - name: Upload checkov results to code scanning
+        if: always() && hashFiles('checkov-results/results_sarif.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results/results_sarif.sarif
+          category: checkov
+
+  plan:
+    name: Plan (dev)
+    needs: static-checks
+    runs-on: ubuntu-latest
+    # Skip (don't fail) until AWS is wired up, and for fork PRs (no OIDC token)
+    if: >-
+      vars.TF_PLAN_ROLE_ARN != '' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      id-token: write       # OIDC
+      pull-requests: write  # plan comment
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        run: terraform -chdir="$WORKDIR" init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform -chdir="$WORKDIR" plan -no-color -lock-timeout=5m -detailed-exitcode -out=tfplan \
+            | tee plan.txt && code=0 || code=$?
+          # 0 = no changes, 2 = changes present, 1 = error
+          [ "$code" -eq 1 ] && exit 1
+          echo "has_changes=$([ "$code" -eq 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('plan.txt', 'utf8');
+            const max = 60000;
+            if (plan.length > max) plan = plan.slice(-max) + '\n... (truncated, see job log)';
+            const marker = '<!-- terraform-plan-dev -->';
+            const body = `${marker}\n### Terraform plan: \`dev\`\n<details><summary>Show plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n</details>`;
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+
+  apply:
+    name: Apply (dev)
+    needs: plan
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    # Protected environment: configure "Required reviewers" on it in repo settings.
+    # The apply role's trust policy ONLY accepts tokens from this environment.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TF_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        run: terraform -chdir="$WORKDIR" init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      # Re-plan with the apply role right before applying, so what's applied
+      # reflects the state at approval time (not when the plan job ran).
+      - name: terraform plan
+        run: terraform -chdir="$WORKDIR" plan -lock-timeout=5m -out=tfplan
+
+      - name: terraform apply
+        run: terraform -chdir="$WORKDIR" apply -lock-timeout=5m tfplan

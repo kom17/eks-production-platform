@@ -1,0 +1,5 @@
+k8s/
+src/test_*.py
+**/__pycache__
+.pytest_cache
+requirements-dev.txt

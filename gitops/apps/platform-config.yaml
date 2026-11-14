@@ -1,0 +1,23 @@
+# Cluster-wide config managed by Git (storage classes, secret stores, ...)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-config
+  namespace: argocd
+  # Cascade delete: removing this Application deletes its resources (ALB, PVCs...)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/kom17/eks-production-platform.git
+    targetRevision: main
+    path: gitops/platform-config
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

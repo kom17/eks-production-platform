@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+# Values marked (bootstrap) come from: terraform -chdir=../../bootstrap output
+region                   = "ap-south-1"
+github_repo              = "YOUR_GITHUB_USER/eks-production-platform"
+github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" # (bootstrap)
+ci_apply_role_arn        = "arn:aws:iam::123456789012:role/eks-platform-gha-terraform-apply"            # (bootstrap)
+ci_plan_role_arn         = "arn:aws:iam::123456789012:role/eks-platform-gha-terraform-plan"             # (bootstrap)
+
+# You: aws sts get-caller-identity --query Arn --output text
+# (if that prints an assumed-role/SSO ARN, use the underlying IAM role ARN instead)
+cluster_admin_arns = ["arn:aws:iam::123456789012:user/YOUR_IAM_USER"]
+
+# Your public IP (curl ifconfig.me) for local-only use. Keep 0.0.0.0/0 if CI applies.
+admin_cidrs = ["0.0.0.0/0"]

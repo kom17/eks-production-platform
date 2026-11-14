@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sample-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-app
+  labels:
+    app.kubernetes.io/name: sample-app
+spec:
+  selector:
+    app.kubernetes.io/name: sample-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# ALB via AWS Load Balancer Controller. target-type "ip" routes straight to pod IPs.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sample-app
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=10
+    # For HTTPS: add an ACM cert ARN and redirect 80 -> 443
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    # alb.ingress.kubernetes.io/ssl-redirect: "443"
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sample-app
+                port:
+                  name: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sample-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sample-app
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # avoid flapping
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sample-app
+spec:
+  minAvailable: 1 # node drains / upgrades can never take all replicas down
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sample-app
+---
+# Default-deny ingress; only allow traffic on the app port (from ALB/VPC)
+# and Prometheus scraping from the monitoring namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sample-app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sample-app
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/16 # VPC CIDR (ALB nodes live in public subnets)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8080
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sample-app
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sample-app
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sample-app
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: sample-app.slo
+      rules:
+        - alert: SampleAppHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+              / clamp_min(sum(rate(http_requests_total[5m])), 1e-9) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "sample-app 5xx error rate above 5% for 5 minutes"
+        - alert: SampleAppHighLatencyP95
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "sample-app p95 latency above 500ms"

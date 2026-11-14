@@ -1,0 +1,40 @@
+# Checkov IaC security scan. Every skip below is a DELIBERATE trade-off for a
+# personal dev environment, with the reason documented. In an interview,
+# "here's what I accepted and why" beats "I have zero findings".
+directory:
+  - terraform
+framework:
+  - terraform
+compact: true
+quiet: true
+download-external-modules: false
+output:
+  - cli
+  - sarif
+output-file-path: console,checkov-results
+# Blocking: any NEW finding fails the PR. (First run triaged: 122 passed,
+# remaining findings are the documented skips below.)
+soft-fail: false
+skip-check:
+  # EKS API: public endpoint is IAM-authenticated; GitHub-hosted runners need it.
+  # Prod answer: self-hosted runners in the VPC + private endpoint only.
+  - CKV_AWS_38
+  - CKV_AWS_39
+  # State bucket: versioned + KMS-encrypted + TLS-only. Cross-region replication,
+  # access logging, event notifications and lifecycle rules are overkill for dev.
+  - CKV_AWS_144
+  - CKV_AWS_18
+  - CKV2_AWS_62
+  - CKV2_AWS_61
+  # Log groups: 14-day retention, AWS-managed encryption (cost trade-off in dev).
+  - CKV_AWS_338
+  - CKV_AWS_158
+  # Terraform apply role uses AdministratorAccess (personal account). Mitigated by:
+  # OIDC-only trust, scoped to the protected "production" environment w/ approval.
+  - CKV_AWS_274
+  # Registry modules are pinned by version (~> X.Y) and resolved from the
+  # Terraform Registry; commit-hash pinning applies to git:: sources.
+  - CKV_TF_1
+  # VPC module slices the FIRST az_count zones by name, so a newly added AZ
+  # can't shift existing subnets.
+  - CKV_AWS_394
