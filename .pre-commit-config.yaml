@@ -21,7 +21,7 @@ repos:
       - id: terraform_tflint
         args: [--args=--config=__GIT_WORKING_DIR__/.tflint.hcl]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.8
+    rev: v0.17.3
     hooks:
       - id: ruff
         files: ^apps/

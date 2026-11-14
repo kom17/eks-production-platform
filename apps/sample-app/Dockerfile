@@ -8,6 +8,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # ---- runtime stage: minimal, non-root ----
 FROM python:3.12-slim
+# Pull in OS security patches published after the base image was built
+# (Trivy gates the build on fixable HIGH/CRITICAL CVEs)
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/*
 ENV PATH="/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
