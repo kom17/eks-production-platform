@@ -91,12 +91,15 @@ jobs:
           python-version: "3.12"
 
       - name: checkov (IaC security scan)
+        id: checkov
         run: |
           pip install --quiet "checkov==${CHECKOV_VERSION}"
           checkov --config-file .checkov.yaml
 
       - name: Upload checkov results to code scanning
-        if: always() && hashFiles('checkov-results/results_sarif.sarif') != ''
+        # Upload even when checkov fails (that's when findings matter most).
+        # Not hashFiles(): it crashes on provider files left by `terraform init`.
+        if: always() && steps.checkov.outcome != 'skipped'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: checkov-results/results_sarif.sarif
